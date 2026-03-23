@@ -1,0 +1,494 @@
+---
+title: "RNA-seq DE analysis"
+output: html_document
+date: "2026-03-13"
+---
+```{r} 
+#First time installations
+requiredPackages = c('BiocManager', 'dplyr', 'stringr', 'tidyr')
+for (p in requiredPackages){
+  if(!require(p,character.only = TRUE)) install.packages(p)
+  library(p, character.only = TRUE)}
+BiocManagerPKG <- c('DESeq2', 'pheatmap', 'EnhancedVolcano')
+for (p in BiocManagerPKG){
+  if(!require(p,character.only = TRUE)) BiocManager::install(p)
+  library(p, character.only = TRUE)}
+```
+
+#Import raw count data from Zhan et al. 2018 (Zhan J, Li G, Ryu CH, Ma C, Zhang S et al. (2018) Opaque-2 Regulates a Complex Gene Network Associated with Cell Differentiation and Storage Functions of Maize Endosperm.)
+```{r}
+counts <- read.delim("https://www.ebi.ac.uk/gxa/experiments-content/E-CURD-41/resources/DifferentialSecondaryDataFiles.RnaSeq/raw-counts")
+head(counts)
+#44303 genes examined across 6 samples
+```
+
+#Import metadata
+```{r}
+metadata = read.delim("https://www.ebi.ac.uk/gxa/experiments-content/E-CURD-41/resources/ExperimentDesignFile.RnaSeq/experiment-design")
+head(metadata)
+```
+#getting gene names - this step needs to be done custom for each new experimental run and as such is currently working for Zea mays
+
+```{r}
+#File downloaded and stored locally from MaizeGDB, roughly 2 Mb
+download.file('https://download.maizegdb.org/Zm-B73-REFERENCE-NAM-5.0/Zm00001eb.1.fulldata.txt.gz', destfile = 'maize.txt.gz')
+genes <- read.delim(
+  gzfile("maize.txt.gz"),
+  comment.char = "#",
+  header = FALSE,
+  sep = "\t"
+)
+```
+
+#Mapping genes to their names from their IDs if available 
+```{r}
+#There's a lot of unnecessary information within the genes object, here we're extracting the important information (gene names) and stripping the rest
+gene_map <- data.frame(
+  gene_id = genes$V2,
+  gene_name_raw = genes$V12,
+  gene_name_fallback = genes$V11,
+  stringsAsFactors = FALSE
+)
+
+#Encoding empty fields as NAs
+gene_map$gene_name_raw[gene_map$gene_name_raw == "-"] <- NA
+gene_map$gene_name_fallback[gene_map$gene_name_fallback == "-"] <- NA
+
+#Lots of genes don't have names associated with registered functions or are uncharacterised, as such we'll use their gene ID
+gene_map$gene_name <- ifelse(
+  !is.na(gene_map$gene_name_raw),
+  gene_map$gene_name_raw,
+  ifelse(
+    !is.na(gene_map$gene_name_fallback),
+    gene_map$gene_name_fallback,
+    gene_map$gene_id
+  )
+)
+
+#Remove any duplicates
+gene_map_final <- gene_map[, c("gene_id", "gene_name")]
+gene_map_final <- gene_map_final[!duplicated(gene_map_final$gene_id), ]
+```
+
+
+#Formatting data appropriately for DESeq2
+```{r}
+#DESeq2 expects count matrix rowname to be gene IDs
+head(counts)
+rownames(counts) = counts$Gene.ID
+head(counts)
+
+#Remove gene id and name
+counts <- counts[-c(1, 2)]
+head(counts)
+
+#DESeq2 expects metadata to have sample IDs in the rownames
+rownames(metadata) = metadata$Run
+metadata <- metadata[colnames(counts),]
+
+#Drop unneeded columns
+metadata = metadata[,c("Factor.Value.genotype."), drop = FALSE]
+
+colnames(metadata) = c('genotype')
+
+
+#avoids warnings in DESeq2
+metadata$genotype[metadata$genotype == 'wild type genotype'] = 'wildtype'
+metadata$genotype[metadata$genotype == 'O2 loss of function mutant'] = 'mutant'
+metadata$genotype = factor(metadata$genotype, levels = c('wildtype', 'mutant'))
+```
+
+#DESeq2 run - only assessing genotype as a factor in changing RNASeq counts
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = counts, colData = metadata, design = ~genotype) 
+dds <- dds[rowSums(counts(dds)) > 10,] #Don't assess genes with only a small number of counts
+dds <- DESeq(dds)
+```
+
+#Format results appropriately
+```{r}
+res <- results(dds, contrast = c('genotype', 'mutant', 'wildtype'), alpha = 1e-5)
+res
+```
+
+#Convert to dataframe and order by adjusted p-value
+```{r}
+res.df <- as.data.frame(res)
+res.df$gene_id <- rownames(res.df)
+res.df <- merge(res.df, gene_map_final, by='gene_id', all.x = TRUE) #Include gene names in this dataframe
+res.df <- res.df[order(res.df$padj),]
+head(res.df)
+```
+
+#Visualisation, MA-plot, Volcano plot
+```{r}
+png("MA_plot.png", width = 8, height = 6, units = "in", res = 300)
+plotMA(res)
+dev.off()
+
+volcano_plot <- EnhancedVolcano(res.df,
+                                lab = res.df$gene_name,
+                                x   = 'log2FoldChange',
+                                y   = 'pvalue')
+
+ggsave("volcano_plot.png",
+       plot   = volcano_plot,
+       width  = 12,
+       height = 10,
+       units  = "in",
+       dpi    = 300)
+```
+
+#PCA
+```{r}
+vsd <- vst(dds, blind = FALSE)
+
+pcaData <- plotPCA(vsd, intgroup="genotype", returnData=TRUE)
+
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+pca_plot <- ggplot(pcaData, aes(PC1, PC2, color = genotype)) +
+  geom_point(size = 4) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  theme_minimal()
+
+ggsave("PCA_plot.png",
+       plot   = pca_plot,
+       width  = 7,
+       height = 6,
+       units  = "in",
+       dpi    = 300)
+```
+
+#Heatmap showing genes ordered by top adjusted p-value
+```{r}
+top_genes <- head(res.df$gene_id, 25)
+
+mat <- assay(vsd)[top_genes, ]
+
+# ============================================================
+# HEATMAP - TOP 25 MOST SIGNIFICANTLY CHANGED GENES
+# Using gene names from res.df$gene_name where available
+# ============================================================
+
+# Build a named vector mapping gene IDs to gene names
+# from res.df, which already has Zm00001eb IDs as fallback
+name_map <- setNames(res.df$gene_name, res.df$gene_id)
+
+# Replace rownames of mat with gene names using the map
+# match() ensures the order of mat rows is preserved exactly
+mat_labels <- name_map[match(rownames(mat), names(name_map))]
+
+# Assign as rownames - safe since you confirmed no NAs
+rownames(mat) <- mat_labels
+
+# ============================================================
+# IMPROVED PHEATMAP CALL
+# ============================================================
+
+# Scale mat by row (gene) so colour reflects relative
+# expression change across samples, not absolute counts.
+# This is standard practice for expression heatmaps as it
+# makes patterns visible regardless of absolute expression level.
+mat_scaled <- t(scale(t(mat)))
+
+pheatmap(mat_scaled,
+         cluster_rows    = TRUE,
+         cluster_cols    = TRUE,
+         show_rownames   = TRUE,
+         annotation_col  = metadata,
+         
+         # Row and column label sizing
+         fontsize_row    = 10,
+         fontsize_col    = 10,
+         
+         # Colour palette: blue-white-red is conventional for
+         # scaled expression (low-high), more interpretable
+         # than the default yellow-red
+         color           = colorRampPalette(c("#4575b4", "white", "#d73027"))(100),
+         
+         # Explicitly set scale breaks so white = 0 (mean expression)
+         # and extremes are symmetrical - adjust the 2 if your data
+         # has larger Z-score spread
+         breaks          = seq(-2, 2, length.out = 101),
+         
+         # Add a descriptive title
+         main            = "Top 25 DE Genes: Opaque-2 vs Wildtype",
+         
+         # Draw borders around each cell for clarity
+         #border_color    = NA,
+         
+         # Dendrogram styling
+         treeheight_row  = 40,
+         treeheight_col  = 20,
+         # Built-in save arguments - pheatmap handles this natively
+         filename        = "heatmap_top25.png",
+         width           = 12,
+         height          = 10)
+```
+#Gene ontology grouping
+
+```{r}
+# ============================================================
+# GO TERM ANALYSIS FOR DESeq2 RESULTS
+# Opaque-2 Loss-of-Function vs Wildtype - Zea mays
+# All dplyr calls explicitly namespaced to avoid masking
+# conflicts common in Bioconductor sessions
+# ============================================================
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(purrr)
+
+# ============================================================
+# STEP 1: PARSE GO TERMS FROM genes OBJECT
+# Uses GO:\d{7} regex as split anchor to avoid the
+# embedded-comma problem within GO term descriptions
+# ============================================================
+
+# Subset to just the two columns we need, using base R
+gene_go_raw <- genes[, c("V2", "V14")]
+colnames(gene_go_raw) <- c("gene_id", "go_terms")
+
+# Remove rows with no GO annotation
+gene_go_raw <- gene_go_raw[!is.na(gene_go_raw$go_terms) & gene_go_raw$go_terms != "", ]
+
+# Extract all GO:XXXXXXX=description pairs using base R + stringr
+# Each GO term entry starts with GO: followed by 7 digits then =
+go_long <- lapply(seq_len(nrow(gene_go_raw)), function(i) {
+  gid   <- gene_go_raw$gene_id[i]
+  terms <- gene_go_raw$go_terms[i]
+  
+  # Extract all GO IDs present in this string
+  go_ids <- stringr::str_extract_all(terms, "GO:\\d{7}")[[1]]
+  
+  # Extract descriptions: everything between "GO:XXXXXXX=" and the next "GO:" or end of string
+  go_descs <- stringr::str_extract_all(terms, "(?<=GO:\\d{7}=)[^|]*?(?=,?GO:\\d{7}=|$)")[[1]]
+  go_descs <- stringr::str_remove(go_descs, ",$")   # strip trailing commas
+  go_descs <- stringr::str_trim(go_descs)            # strip whitespace
+  
+  # Pair them up safely
+  n <- min(length(go_ids), length(go_descs))
+  if (n == 0) return(NULL)
+  
+  data.frame(
+    gene_id = gid,
+    go_id   = go_ids[1:n],
+    go_desc = go_descs[1:n],
+    stringsAsFactors = FALSE
+  )
+})
+
+# Combine into one long data frame
+go_long <- do.call(rbind, go_long)
+
+# Remove duplicate gene-term pairs (your data showed these are common)
+go_long <- go_long[!duplicated(go_long[, c("gene_id", "go_id")]), ]
+
+# Sanity check
+cat("Genes with GO annotations:", length(unique(go_long$gene_id)), "\n")
+cat("Unique GO terms found:", length(unique(go_long$go_id)), "\n")
+print(head(go_long, 10))
+
+# ============================================================
+# STEP 2: IDENTIFY SIGNIFICANTLY CHANGED GENES FROM DESeq2
+# ============================================================
+
+sig_genes <- res.df[!is.na(res.df$padj) & res.df$padj < 0.05, ]
+sig_genes$direction <- ifelse(sig_genes$log2FoldChange > 0, "upregulated", "downregulated")
+
+cat("Total significant genes:", nrow(sig_genes), "\n")
+cat("Upregulated:", sum(sig_genes$direction == "upregulated"), "\n")
+cat("Downregulated:", sum(sig_genes$direction == "downregulated"), "\n")
+
+# ============================================================
+# STEP 3: JOIN SIGNIFICANT GENES WITH GO TERMS
+# ============================================================
+
+sig_go <- merge(
+  sig_genes[, c("gene_id", "log2FoldChange", "padj", "direction")],
+  go_long,
+  by = "gene_id"
+)
+
+cat("Significant genes with GO annotations:", length(unique(sig_go$gene_id)), "\n")
+
+# ============================================================
+# STEP 4: GO TERM FREQUENCY TABLE (Analysis 1)
+# ============================================================
+
+go_freq <- sig_go |>
+  dplyr::group_by(go_id, go_desc) |>
+  dplyr::summarise(
+    gene_count   = dplyr::n_distinct(gene_id),
+    up_count     = dplyr::n_distinct(gene_id[direction == "upregulated"]),
+    down_count   = dplyr::n_distinct(gene_id[direction == "downregulated"]),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(dplyr::desc(gene_count))
+
+cat("\n--- Top 20 GO terms by gene count ---\n")
+print(head(go_freq, 20))
+
+write.csv(go_freq, "GO_term_frequency_table.csv", row.names = FALSE)
+
+# ============================================================
+# STEP 5: OVER-REPRESENTATION ANALYSIS (Analysis 2)
+# Fisher's Exact Test with Benjamini-Hochberg correction
+# ============================================================
+
+all_annotated_genes <- length(unique(go_long$gene_id))
+total_sig           <- length(unique(sig_go$gene_id))
+
+go_background <- go_long |>
+  dplyr::group_by(go_id, go_desc) |>
+  dplyr::summarise(background_count = dplyr::n_distinct(gene_id), .groups = "drop")
+
+ora_input <- merge(go_freq, go_background, by = c("go_id", "go_desc"))
+
+# Run Fisher's exact test for each GO term
+fisher_results <- lapply(seq_len(nrow(ora_input)), function(i) {
+  a <- ora_input$gene_count[i]                                  # DE genes WITH term
+  b <- ora_input$background_count[i] - a                        # non-DE WITH term
+  c <- total_sig - a                                            # DE WITHOUT term
+  d <- all_annotated_genes - ora_input$background_count[i] - c  # non-DE WITHOUT term
+  
+  # Guard against negative cells from annotation mismatches
+  if (any(c(a, b, c, d) < 0)) return(data.frame(p_value = NA, odds_ratio = NA))
+  
+  ft <- fisher.test(matrix(c(a, b, c, d), nrow = 2), alternative = "greater")
+  data.frame(p_value = ft$p.value, odds_ratio = as.numeric(ft$estimate))
+})
+
+fisher_df   <- do.call(rbind, fisher_results)
+ora_results <- cbind(ora_input, fisher_df)
+ora_results$p_adj <- p.adjust(ora_results$p_value, method = "BH")
+ora_results <- ora_results[order(ora_results$p_adj), ]
+
+cat("\n--- Enriched GO terms (ORA padj < 0.05) ---\n")
+print(head(ora_results[ora_results$p_adj < 0.05, 
+           c("go_id", "go_desc", "gene_count", "background_count", "odds_ratio", "p_value", "p_adj")], 20))
+
+write.csv(ora_results, "GO_ORA_results.csv", row.names = FALSE)
+
+# ============================================================
+# STEP 6: VISUALISATIONS (Analysis 4)
+# ============================================================
+
+top_n <- 20
+
+# --- Plot 1: Stacked bar chart - frequency of top GO terms ---
+go_freq_top <- head(go_freq, top_n)
+go_freq_top$go_label <- stringr::str_wrap(
+  paste0(go_freq_top$go_id, ": ", go_freq_top$go_desc), width = 45
+)
+
+# Reshape to long format for ggplot stacking
+bar_data <- rbind(
+  data.frame(go_label  = go_freq_top$go_label,
+             gene_count = go_freq_top$gene_count,
+             count     = go_freq_top$up_count,
+             direction = "Upregulated"),
+  data.frame(go_label  = go_freq_top$go_label,
+             gene_count = go_freq_top$gene_count,
+             count     = go_freq_top$down_count,
+             direction = "Downregulated")
+)
+
+p1 <- ggplot(bar_data, aes(x = reorder(go_label, gene_count), y = count, fill = direction)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("Upregulated" = "#d73027", "Downregulated" = "#4575b4")) +
+  coord_flip() +
+  labs(
+    title    = "Top GO Terms in Differentially Expressed Genes",
+    subtitle = "Opaque-2 Loss-of-Function vs Wildtype",
+    x        = NULL,
+    y        = "Number of DE Genes",
+    fill     = "Direction"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("GO_barplot_frequency.png", p1, width = 12, height = 8, dpi = 300)
+print(p1)
+
+# --- Plot 2: Dot plot - enriched GO terms from ORA ---
+ora_sig <- ora_results[!is.na(ora_results$p_adj) & ora_results$p_adj < 0.05, ]
+ora_sig <- head(ora_sig[order(-ora_sig$odds_ratio), ], top_n)
+ora_sig$go_label   <- stringr::str_wrap(paste0(ora_sig$go_id, ": ", ora_sig$go_desc), width = 50)
+ora_sig$log10_padj <- -log10(ora_sig$p_adj)
+
+p2 <- ggplot(ora_sig, aes(x = odds_ratio,
+                           y = reorder(go_label, odds_ratio),
+                           size = gene_count,
+                           colour = log10_padj)) +
+  geom_point() +
+  scale_colour_gradient(low = "#fee090", high = "#d73027", name = "-log10(adj. p)") +
+  scale_size_continuous(name = "DE Gene Count", range = c(3, 10)) +
+  labs(
+    title    = "GO Term Over-Representation Analysis",
+    subtitle = "Fisher's Exact Test, Benjamini-Hochberg correction",
+    x        = "Odds Ratio",
+    y        = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("GO_dotplot_ORA.png", p2, width = 13, height = 8, dpi = 300)
+print(p2)
+
+# --- Plot 3: Directional dot plot - up vs downregulated separately ---
+up_go <- sig_go[sig_go$direction == "upregulated", ]
+up_go <- aggregate(gene_id ~ go_id + go_desc, data = up_go,
+                   FUN = function(x) length(unique(x)))
+colnames(up_go)[3] <- "gene_count"
+up_go$direction <- "Upregulated"
+
+dn_go <- sig_go[sig_go$direction == "downregulated", ]
+dn_go <- aggregate(gene_id ~ go_id + go_desc, data = dn_go,
+                   FUN = function(x) length(unique(x)))
+colnames(dn_go)[3] <- "gene_count"
+dn_go$direction <- "Downregulated"
+
+dir_go <- rbind(up_go, dn_go)
+dir_go <- merge(dir_go,
+                ora_results[, c("go_id", "p_adj", "odds_ratio")],
+                by = "go_id")
+dir_go <- dir_go[!is.na(dir_go$p_adj) & dir_go$p_adj < 0.05, ]
+
+# Take top 15 per direction by gene count
+dir_go <- do.call(rbind, lapply(split(dir_go, dir_go$direction), function(x) {
+  head(x[order(-x$gene_count), ], 15)
+}))
+
+dir_go$go_label <- stringr::str_wrap(paste0(dir_go$go_id, ": ", dir_go$go_desc), width = 45)
+
+p3 <- ggplot(dir_go, aes(x = direction,
+                          y = reorder(go_label, gene_count),
+                          size = gene_count,
+                          colour = -log10(p_adj))) +
+  geom_point() +
+  scale_colour_gradient(low = "#74add1", high = "#d73027", name = "-log10(adj. p)") +
+  scale_size_continuous(name = "Gene Count", range = c(3, 10)) +
+  labs(
+    title    = "Enriched GO Terms by Direction of Regulation",
+    subtitle = "Opaque-2 Loss-of-Function vs Wildtype",
+    x        = NULL,
+    y        = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("GO_dotplot_directional.png", p3, width = 13, height = 9, dpi = 300)
+print(p3)
+
+cat("\nDone! Output files written:\n")
+cat("  GO_term_frequency_table.csv\n")
+cat("  GO_ORA_results.csv\n")
+cat("  GO_barplot_frequency.png\n")
+cat("  GO_dotplot_ORA.png\n")
+cat("  GO_dotplot_directional.png\n")
+```
