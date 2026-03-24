@@ -35,8 +35,13 @@ This project uses publicly available RNA-seq data to perform a differential expr
 ├── analysis.R                 # Full analysis pipeline (end-to-end)
 ├── sessionInfo.txt            # R session and package version information
 ├── data/
-│   └── genes.txt              # MaizeGDB gene annotation file
+│   ├── E-CURD-41-experiment-design.tsv # Experimental design (metadata)
+│    ├── E-CURD-41-raw-counts.tsv        # Raw data generated experimentally (RNA-Seq counts)
+│    └── genes.txt                       # MaizeGDB gene annotation file      
 ├── plots/
+│   ├── GO_barplot_frequency.png
+│   ├── GO_dotplot_directional.png
+│   ├── GO_dotplot_ORA.png
 │   ├── MA_plot.png
 │   ├── volcano_plot.png
 │   ├── PCA_plot.png
@@ -162,11 +167,15 @@ While the results reported here differ from those reported by Zhan et al. (i.e. 
 - **Annotation completeness:** Not all *Zea mays* genes in the MaizeGDB annotation carry GO term assignments. Genes lacking annotation are excluded from the ORA background, which may introduce a modest bias toward well-characterised gene families.
 - **Single tissue/timepoint:** Data are derived from endosperm tissue at a single developmental stage. The regulatory role of O2 may differ in other tissues or developmental contexts.
 
----
+--- 
+
+## Extensions
+
+- Currently, the GO term ORA includes only binary membership in terms of whether or not a gene is up- or down-regulated. Given the biological debate centers on whether or not O2 is a direct or indirect regulator of various cellular processes, the magnitude by which expression of genes within GO terms changes in wildtype vs mutant would be a worthwhile question to investigate. This would allow for distinction between a GO term where member genes are consistently strongly up- or down-regulated and one where change is weak or in inconsistent directionality.
+
+--- 
 
 ## References
-
-> References should be completed with full citation details. Placeholders are provided below.
 
 - Love MI, Huber W, Anders S. (2014). Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. *Genome Biology*, 15, 550.
 - Trapnell C, et al. (2012). Differential gene and transcript expression analysis of RNA-seq experiments with TopHat and Cufflinks. *Nature Protocols*, 7, 562–578.
